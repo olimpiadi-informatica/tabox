@@ -22,7 +22,7 @@ extern "C" {
 
 /// Setup the resource limits
 pub fn setup_resource_limits(config: &SandboxConfiguration) -> Result<()> {
-    // on macOS Montmery this seems to fail for no reason
+    // macOS does not support RLIMIT_AS (https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/setrlimit.2.html)
     #[cfg(not(target_os = "macos"))]
     {
         if let Some(memory_limit) = config.memory_limit {

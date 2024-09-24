@@ -5,6 +5,7 @@
 //! This module contains the sandbox for MacOS
 
 use std::fs::File;
+use std::mem::MaybeUninit;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,6 +14,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
+use libc::mach_task_self;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 
@@ -71,24 +73,33 @@ impl Sandbox for MacOSSandbox {
         let killed = Arc::new(AtomicBool::new(false));
         let child_pid = child.id() as i32;
 
-        if let Some(memory_limit) = config.memory_limit {
-            // This thread monitors the memory used by the process and kills it when the limit is exceeded
-            thread::Builder::new()
-                .name("TABox memory watcher".into())
-                .spawn(move || {
-                    loop {
-                        if get_macos_memory_usage(child_pid) > memory_limit {
-                            // Kill process if memory limit exceeded.
-                            // Send SIGSEGV since it's the same that Linux sends.
-                            kill(Pid::from_raw(child_pid), Signal::SIGSEGV)
-                                .expect("Error killing child due to memory limit exceeded");
-                        }
+        // This thread monitors the resources used by the process and kills it when the limit is exceeded
+        thread::Builder::new()
+            .name("TABox resource watcher".into())
+            .spawn(move || {
+                let task = {
+                    let mut task: libc::mach_port_t = Default::default();
+                    let result =
+                        unsafe { libc::task_for_pid(mach_task_self(), child_pid, &mut task) };
 
-                        thread::sleep(Duration::new(0, 1_000));
+                    if result != libc::KERN_SUCCESS {
+                        panic!("Failed to get task port");
                     }
-                })
-                .context("Failed to start memory watcher thread")?;
-        }
+
+                    task
+                };
+
+                loop {
+                    if has_exceeded_resources(task, config.time_limit, config.memory_limit) {
+                        // Send SIGSEGV since it's the same that Linux sends.
+                        kill(Pid::from_raw(child_pid), Signal::SIGSEGV)
+                            .expect("Error killing child");
+                    }
+
+                    thread::sleep(Duration::from_millis(5));
+                }
+            })
+            .context("Failed to start watcher thread")?;
 
         if let Some(limit) = config.wall_time_limit {
             start_wall_time_watcher(limit, child_pid, killed.clone())?;
@@ -125,19 +136,40 @@ impl Sandbox for MacOSSandbox {
     }
 }
 
-/// Get the process memory usage in bytes calling PS
-fn get_macos_memory_usage(child_pid: i32) -> u64 {
-    let result = Command::new("ps")
-        .arg("-o")
-        .arg("rss=")
-        .arg(format!("{}", child_pid))
-        .output()
-        .unwrap();
+fn has_exceeded_resources(
+    task: libc::mach_port_t,
+    time_limit: Option<u64>,
+    memory_limit: Option<u64>,
+) -> bool {
+    let mut task_info = MaybeUninit::<libc::mach_task_basic_info_data_t>::uninit();
+    let mut count = libc::MACH_TASK_BASIC_INFO_COUNT;
 
-    std::str::from_utf8(&result.stdout)
-        .unwrap()
-        .trim()
-        .parse::<u64>()
-        .unwrap_or(0)
-        * 1024
+    let result = unsafe {
+        libc::task_info(
+            task,
+            libc::MACH_TASK_BASIC_INFO,
+            task_info.as_mut_ptr() as libc::task_info_t,
+            &mut count as *mut libc::mach_msg_type_number_t,
+        )
+    };
+
+    if result != libc::KERN_SUCCESS {
+        panic!("Failed to get task info");
+    }
+
+    let task_info = unsafe { task_info.assume_init() };
+
+    if let Some(time_limit) = time_limit {
+        if task_info.user_time.seconds as u64 >= time_limit {
+            return true;
+        }
+    }
+
+    if let Some(memory_limit) = memory_limit {
+        if task_info.resident_size_max > memory_limit {
+            return true;
+        }
+    }
+
+    false
 }
