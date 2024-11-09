@@ -4,8 +4,9 @@
 // SPDX-License-Identifier: MPL-2.0
 //! This module contains the sandbox for MacOS
 
-use std::fs::File;
+use std::fs::{metadata, set_permissions, File, Permissions};
 use std::mem::MaybeUninit;
+use std::os::unix::fs::{symlink, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -47,7 +48,7 @@ impl Sandbox for MacOSSandbox {
             .args(config.args)
             .env_clear()
             .envs(config.env)
-            .current_dir(config.working_directory);
+            .current_dir(&config.working_directory);
 
         if let Some(stdin) = &config.stdin {
             let stdin = File::open(stdin)
@@ -65,6 +66,31 @@ impl Sandbox for MacOSSandbox {
             let stderr = File::create(stderr)
                 .with_context(|| format!("Failed to open stderr file at {}", stderr.display()))?;
             command.stderr(stderr);
+        }
+
+        for mount in &config.mount_paths {
+            let is_inside_sandbox = mount.target.starts_with(&config.working_directory);
+            let is_nested = config
+                .mount_paths
+                .iter()
+                .any(|m| mount.target != m.target && mount.target.starts_with(&m.target));
+            if is_inside_sandbox && is_nested {
+                let parent = mount.target.parent().with_context(|| {
+                    format!("Invalid mount directory {}", mount.target.display())
+                })?;
+                let permissions = metadata(parent)
+                    .with_context(|| {
+                        format!("Failed to mount directory {}", mount.target.display())
+                    })?
+                    .permissions();
+                set_permissions(&parent, Permissions::from_mode(0o700)).with_context(|| {
+                    format!("Failed to mount directory {}", mount.target.display())
+                })?;
+                symlink(&mount.source, &mount.target).with_context(|| {
+                    format!("Failed to mount directory {}", mount.target.display())
+                })?;
+                set_permissions(&parent, permissions)?;
+            }
         }
 
         // Spawn child
