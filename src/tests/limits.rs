@@ -57,7 +57,7 @@ int main() {
 
 #[test]
 // macOS has a much lower stack limit than Linux (~8Mb and a maximum of 64)
-#[cfg(os = "linux")]
+#[cfg(target_os = "linux")]
 fn test_stack_limit_ok() {
     let mut config = SandboxConfiguration::default();
     config
@@ -72,7 +72,7 @@ fn test_stack_limit_ok() {
 
 #[test]
 // macOS has a much lower stack limit than Linux (~8Mb and a maximum of 64)
-#[cfg(os = "linux")]
+#[cfg(target_os = "linux")]
 fn test_stack_limit_default() {
     let mut config = SandboxConfiguration::default();
     config.memory_limit(100 * 1_000_000);

@@ -108,7 +108,7 @@ fn watcher(config: SandboxConfiguration) -> Result<SandboxExecutionResult> {
     // Allocate some memory that the forked process can use to write the error. This memory is
     // page-aligned, which is hopefully enough for ErrorMessage.
     let shared = unsafe {
-        std::mem::transmute(libc::mmap(
+        std::mem::transmute::<*mut libc::c_void, *mut ErrorMessage>(libc::mmap(
             std::ptr::null_mut(),
             std::mem::size_of::<ErrorMessage>(),
             libc::PROT_READ | libc::PROT_WRITE,
