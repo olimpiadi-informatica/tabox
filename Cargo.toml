@@ -29,7 +29,7 @@ libc = "0.2"
 tempfile = "3.14"
 nix = { version = "0.29", features = ["mount", "fs", "user", "sched", "signal"] }
 anyhow = "1"
-signal-hook = "0.1"
+signal-hook = "0.3"
 lazy_static = "1.5"
 
 # tabox binary dependencies
