@@ -5,7 +5,6 @@
 //! This module contains the sandbox for MacOS
 
 use std::fs::{metadata, set_permissions, File, Permissions};
-use std::mem::MaybeUninit;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command};
@@ -15,7 +14,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use libc::mach_task_self;
+use libproc::libproc::proc_pid::pidinfo;
+use libproc::libproc::task_info::TaskInfo;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 
@@ -102,28 +102,18 @@ impl Sandbox for MacOSSandbox {
         // This thread monitors the resources used by the process and kills it when the limit is exceeded
         thread::Builder::new()
             .name("TABox resource watcher".into())
-            .spawn(move || {
-                let task = {
-                    let mut task: libc::mach_port_t = Default::default();
-                    let result =
-                        unsafe { libc::task_for_pid(mach_task_self(), child_pid, &mut task) };
-
-                    if result != libc::KERN_SUCCESS {
-                        panic!("Failed to get task port");
-                    }
-
-                    task
-                };
-
-                loop {
-                    if has_exceeded_resources(task, config.time_limit, config.memory_limit) {
+            .spawn(move || loop {
+                match has_exceeded_resources(child_pid, config.time_limit, config.memory_limit) {
+                    ResourceCheckResult::Exceeded => {
                         // Send SIGSEGV since it's the same that Linux sends.
                         kill(Pid::from_raw(child_pid), Signal::SIGSEGV)
                             .expect("Error killing child");
                     }
-
-                    thread::sleep(Duration::from_millis(5));
+                    ResourceCheckResult::ProcessGone => return,
+                    ResourceCheckResult::Ok => {}
                 }
+
+                thread::sleep(Duration::from_millis(5));
             })
             .context("Failed to start watcher thread")?;
 
@@ -162,40 +152,39 @@ impl Sandbox for MacOSSandbox {
     }
 }
 
+enum ResourceCheckResult {
+    Ok,
+    Exceeded,
+    ProcessGone,
+}
+
 fn has_exceeded_resources(
-    task: libc::mach_port_t,
+    pid: i32,
     time_limit: Option<u64>,
     memory_limit: Option<u64>,
-) -> bool {
-    let mut task_info = MaybeUninit::<libc::mach_task_basic_info_data_t>::uninit();
-    let mut count = libc::MACH_TASK_BASIC_INFO_COUNT;
-
-    let result = unsafe {
-        libc::task_info(
-            task,
-            libc::MACH_TASK_BASIC_INFO,
-            task_info.as_mut_ptr() as libc::task_info_t,
-            &mut count as *mut libc::mach_msg_type_number_t,
-        )
+) -> ResourceCheckResult {
+    let task_info = match pidinfo::<TaskInfo>(pid, 0) {
+        Ok(info) => info,
+        Err(err) => {
+            if err.contains("No such process") {
+                return ResourceCheckResult::ProcessGone;
+            }
+            panic!("Failed to get task info: {}", err)
+        }
     };
 
-    if result != libc::KERN_SUCCESS {
-        panic!("Failed to get task info");
-    }
-
-    let task_info = unsafe { task_info.assume_init() };
-
     if let Some(time_limit) = time_limit {
-        if task_info.user_time.seconds as u64 >= time_limit {
-            return true;
+        // pti_total_user is in nanoseconds
+        if task_info.pti_total_user / 1_000_000_000 >= time_limit {
+            return ResourceCheckResult::Exceeded;
         }
     }
 
     if let Some(memory_limit) = memory_limit {
-        if task_info.resident_size_max > memory_limit {
-            return true;
+        if task_info.pti_resident_size > memory_limit {
+            return ResourceCheckResult::Exceeded;
         }
     }
 
-    false
+    ResourceCheckResult::Ok
 }
