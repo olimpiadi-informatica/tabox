@@ -565,7 +565,7 @@ dependencies = [
 
 [[package]]
 name = "tabox"
-version = "1.3.6"
+version = "1.3.7"
 dependencies = [
  "anyhow",
  "env_logger",
